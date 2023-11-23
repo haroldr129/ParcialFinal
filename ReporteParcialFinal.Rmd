@@ -1,0 +1,375 @@
+---
+title: "Proyecto final, aprendizaje automático supervisado."
+author: "Harold Andres Romero Lopez, María Paula Morales Rodríguez, Daniela Alejandra Paternina Avilez"
+date: "r Sys.Date()"
+output: pdf_document
+---
+
+```{r setup, message=FALSE, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(devtools)
+library(tidyverse)
+library(dplyr)
+library(rpart)
+library(caret)
+library(glmnet)
+```
+
+```{r, message=FALSE, include=FALSE, warning=FALSE}
+PPI <- DynamicCancerDriverKM::PPI
+ 
+Matriz_Normal_Tumor <- merge(DynamicCancerDriverKM::BRCA_normal,DynamicCancerDriverKM::BRCA_PT,all = TRUE)
+Matriz_Normal_Tumor <- Matriz_Normal_Tumor[,-c(1:3)]
+Matriz_Normal_Tumor <- Matriz_Normal_Tumor[,-c(2:4)]
+ 
+## En esta linea, hallamos el valor maximo para toda la tabla y sacamos el 0,1%
+##para posteriormente ver si el gen esta expresado
+Valor_Maximo <- max(Matriz_Normal_Tumor[,2:23688], na.rm=FALSE)*0.0002
+ 
+ 
+### En las siguientes lineas de codigo vamos a binarizar la tabla, donde los valores
+## que superen el umbral o valor maximo propuesto, se conviertan en 1 y los que no en 0
+ 
+ 
+Matriz_Normal_Tumor_binario <- Matriz_Normal_Tumor
+Matriz_Normal_Tumor_binario[, 2:23688] <- apply(Matriz_Normal_Tumor[, 2:23688], 2, function(x) ifelse(x > Valor_Maximo, 1, 0))
+ 
+## En el siguiente paso, vamos a eliminar los genes que no estan expresados como minimo en el
+## 20% de las observaciones
+ 
+Porcentajes <- colMeans(Matriz_Normal_Tumor_binario[, 2:ncol(Matriz_Normal_Tumor_binario)] == 1)
+ 
+Matriz_Normal_Tumor_binario_filtrado <- Matriz_Normal_Tumor_binario[, Porcentajes >= 0.2]
+ 
+porcentaje_columna <- colMeans(Matriz_Normal_Tumor_binario_filtrado[, 2:ncol(Matriz_Normal_Tumor_binario_filtrado)]==1)
+porcentaje_columna
+ 
+###### A continuación renombramos las variables de acuerdo con el HGNC.symbol para por cruzarlas con el df PPI
+ 
+PPIs_Renombrados <- AMCBGeneUtils::changeGeneId(PPI$`Input-node Gene Symbol`,from="HGNC.symbol")
+colnames(Matriz_Normal_Tumor_binario_filtrado)[c(2:ncol(Matriz_Normal_Tumor_binario_filtrado))] <- PPIs_Renombrados$HGNC.symbol
+ 
+ 
+####### A continuación contaremos el numero de veces que se repite cada gen, tanto en INPUT como en Output
+ 
+Agrupacion <- PPI %>% group_by(`Input-node Gene Symbol`) %>%
+  summarise(NN = n()) %>%
+  rename(`Gen`=`Input-node Gene Symbol`)
+ 
+Agrupacion2 <- PPI %>% group_by(`Output-node Gene Symbol`) %>%
+  summarise(NN = n()) %>%
+  rename(`Gen`=`Output-node Gene Symbol`)
+ 
+### Combinamos las dos tablas que hacen el conteo tanto de Input como de Output
+tabla_combinada <- bind_rows(Agrupacion, Agrupacion2) %>%
+  group_by(`Gen`) %>%
+  summarise(NN = sum(NN)) %>%
+  arrange(desc(NN)) %>%
+  top_n(101, NN)
+ 
+Cambiar_nombres_tabla_combinada <- AMCBGeneUtils::changeGeneId(tabla_combinada$Gen,from="HGNC.symbol")
+rownames(tabla_combinada) <- Cambiar_nombres_tabla_combinada$HGNC.symbol
+ 
+nombres_variables <- colnames(Matriz_Normal_Tumor_binario_filtrado)
+# Convertir los nombres de las variables en una matriz
+matriz_nombres_variables <- as.matrix(nombres_variables)
+ 
+valores_comunes <- intersect(tabla_combinada$Gen, matriz_nombres_variables)
+valores_comunes <- as.matrix(valores_comunes)
+ 
+##### a Continuación la matriz final con la que trabajaremos los modelos
+Matriz_Final <- Matriz_Normal_Tumor_binario_filtrado[,c("sample_type",valores_comunes)]
+Matriz_Final <- Matriz_Final[, !names(Matriz_Final) == "APP"]
+```
+
+## 1. Introducción
+
+De acuerdo a la Universidad Veracruzana, diariamente, se crean más 2.5 bytes de datos de diversas fuentes y se espera que para el 2025 se supere el total de 180 zettabytes . Estos grandes volúmenes de datos (Big Data) permiten a empresas, compañías e industrias analizar y procesar dicha información, esto se traduce en una herramienta que permite determinar tendencias, evaluar la reacción del público (Universidad de Alcalá,2018), tomar decisiones de manera más rápida, segura y concisa en diversas áreas de aplicación como por ejemplo la salud, además de otras utilidades.
+
+La ciencia de datos cobra relevancia al combinar herramientas, tecnología y diferentes metodologías para extraer datos y generar información significativa a partir de ellos (Amazon Web Service, s. f.). Es allí donde el aprendizaje supervisado cumple un papel fundamental al momento de poner en práctica estos avances tecnológicos, ya que es una subcategoría del machine learning y la inteligencia artificial que usa  conjuntos de datos etiquetados para entrenar algoritmos que clasifiquen o predigan resultados de forma precisa (IBM, s. f.). En la ingeniería de aprendizaje automático, se busca investigar, construir, diseñar y desarrollar sistemas de aprendizaje supervisado que utilicen un conjunto de datos de entrenamiento para enseñar a los modelos a generar salidas deseadas y datos de prueba que determinen la eficacia del modelo creado(De Ceupe, 2022).
+
+## 2. Marco teórico
+
+El aprendizaje supervisado es una técnica usada en exploración de datos, en la que se genera una función de pronóstico a partir del entrenamiento previo de datos. Se dice que es supervisado porque, antes debe existir una clasificación o etiquetado de los datos que es lo que aporta el conocimiento. El proceso habitual consiste en dividir la muestra en dos conjuntos, uno de entrenamiento y otro de prueba, con los datos de entrenamiento ordenados convenientemente se obtendrá un conjunto de pares de entrada-salida. La salida es la variable dependiente, y las entradas son las variables que usaremos para pronosticar la variable dependiente. Es decir, la salida es lo que se quiere pronosticar. (Villalba. F (s/f))
+
+Existen diversos algoritmos de aprendizaje supervisado, pero de acuerdo al tipo de variable que se maneje se pueden dividir en dos: Cuando la variable sea discreta se llamará clasificación y cuando la variable sea continua se llamará de regresión.
+
+-   Clasificación
+
+La clasificación utiliza un algoritmo para asignar con precisión datos de prueba en categorías específicas. Reconoce entidades específicas dentro del conjunto de datos e intenta sacar algunas conclusiones sobre cómo esas entidades deben etiquetarse o definirse. Los algoritmos de clasificación comunes son clasificadores lineales, máquinas de vectores de soporte, árboles de decisión, k-NN y bosques aleatorios.
+
+-   Regresión
+
+La regresión se utiliza para comprender la relación entre variables dependientes e independientes, se utiliza comúnmente para hacer proyecciones, como los ingresos por ventas de un negocio determinado. Regresión lineal, regresión logística y regresión polinomial son algoritmos de regresión popular.
+
+Algoritmos de aprendizaje supervisado
+
+-   Regresión
+
+lineal La regresión lineal es utilizada para identificar la relación entre una variable dependiente y una o más variables independientes, y normalmente se aplica para hacer predicciones sobre resultados futuros. Cuando solo hay una variable independiente y una variable dependiente, se conoce como regresión lineal simple. A medida que aumenta el número de variables independientes, se denomina regresión lineal múltiple. Para cada tipo de regresión lineal, esta clasificación busca trazar una línea de mejor ajuste, que se calcula mediante el método de mínimos cuadrados. (IBM.(s/f)).
+
+-   Algoritmo k-NN (k-Nearest Neighbour Classification)
+
+El algoritmo k-NN reconoce patrones en los datos sin un aprendizaje específico, el cual consiste en medir la distancia entre grupos de datos. Para crear el modelo es necesario cargar el paquete "class" y usar la función knn() que realiza la clasificación. La idea principal del modelo es que a partir de un conjunto de datos de entrenamiento se pueda deducir el agrupamiento de los datos.
+
+-   Regresión logística
+
+Es un tipo de análisis de regresión utilizado para predecir el resultado de una variable categórica la cual puede adoptar un número limitado de categorías en función de las variables predictoras. Este modelo de pronóstico se usa normalmente en variables que se distribuyen en forma de binomial, es decir que simplemente tratan de decir si algo es 1 que significa SI o 0 que significa NO.
+
+-   Árboles de decisión
+
+Un árbol de decisión es una estructura ramificada que muestra las diferentes opciones y sus consecuencias. Los puntos en los que hay que tomar decisiones se muestran como nodos, las ramas unen estos nodos y las últimas decisiones son las hojas.
+
+-   Bosques aleatorios de decisión (random forest)
+
+Si se aplica de manera repetitiva el algoritmo de árboles de decisión con diferentes parámetros sobre los mismos datos, se obtendrá un bosque aleatorio de decisión. Este modelo consiste en construir diferentes conjuntos de entrenamiento y prueba sobre los mismos datos, lo que genera diferentes árboles de decisión sobre los mismos datos. La unión de estos árboles de diferentes complejidades y con datos de origen distinto aunque del mismo conjunto resulta un bosque aleatorio. (Villalba. F (s/f))
+
+-   Máquina de soporte vectorial (SVM)
+
+Una máquina de vectores de soporte se utiliza tanto para la clasificación como para la regresión de datos, el modelo se basa en la construcción de un hiperplano donde la distancia entre dos clases de puntos de datos es máxima. Este hiperplano se conoce como el límite de decisión, que separa las clases de puntos de datos en ambos lados del plano.(IBM.(s/f)).
+
+Training data vs. Testing data
+
+La principal diferencia entre los datos de entrenamiento y los datos de prueba es que los datos de entrenamiento son el subconjunto de datos originales que se utiliza para entrenar el modelo de aprendizaje automático, mientras que los datos de prueba se utilizan para verificar la precisión del modelo. El conjunto de datos de entrenamiento es generalmente de mayor tamaño en comparación con el conjunto de datos de prueba. Las proporciones generales de división de conjuntos de datos de entrenamiento y prueba son 80-20, 70-30 o 90-10. (JavaTpoint (s/f))
+
+Overfitting y Underfitting
+
+El overfitting o sobreajuste es un fenómeno que hace que un algoritmo predictivo presente un bajo porcentaje de acierto en sus resultados, ofreciendo previsiones con una alta varianza. Esto sucede si la muestra utilizada en el entrenamiento del modelo:
+
+-   Es poco representativa de la realidad con la que se tendrá que enfrentar después el algoritmo.
+
+-   Incluye demasiadas variables, e incluso variables irrelevantes, que confunden al modelo y le impiden identificar la tendencia subyacente.
+
+-   Se ha sobrepasado el umbral óptimo de épocas (número de veces que el modelo procesa los mismos datos de entrada en el training).
+
+Por oposición al overfitting se tiene a el underfitting o el desajuste, el cual genera una escasa fiabilidad en las predicciones del modelo. El underfitting o desajuste quiere decir que los datos de entrada son insuficientes o escasa información para lo que se pretende deducir. (BETWEEN. (2020))
+
+Cross-Validation
+
+El cross-validation o validación cruzada es un método que permite probar el rendimiento de un modelo predictivo, después de entrenar un modelo de Machine Learning con datos etiquetados, se supone que tiene que funcionar con nuevos datos, sin embargo es importante garantizar la exactitud de las predicciones del modelo en producción. para poder determinar si aún falta por ajustarlo, se ha ajustado de más o está "bien generalizado". Para probar la eficacia de un modelo se utiliza el "cross-validation" o validación cruzada. Este método también es un procedimiento de remuestreo que permite evaluar un modelo incluso con datos limitados. (Datascientest (2022)).
+
+## 3. Metodológia
+
+# Metodologia
+
+Para el desarrollo del presente trabajo utilizamos el paquete `DynamicCancerDriverKM` , para ello realizamos la instalación del paquete en el repositorio en github `https://github.com/AndresMCB/DynamicCancerDriverKM`en su interior se encuentran las instrucciones de instalación (por favor referirse al repositorio para mas información)
+
+Posteriomente se construye una matriz de expresión genetica unificada, donde combinamos las matrices con pacientes con `Primary Tumor` (Tumor detectado) y pacientes con `Solid Tissue Normal` (Tejido normal), manteniendo la varibale `sample_type` la cual sera nuestra variable clase, se eliminan las variables que no contienen la variable clase y los genes a analizar, estos pasos fueron realizados con el codigo:
+
+```{r, eval=FALSE}
+Matriz_Normal_Tumor <- 
+  merge(DynamicCancerDriverKM::BRCA_normal,
+                             DynamicCancerDriverKM::BRCA_PT,all = TRUE)
+
+Matriz_Normal_Tumor <- 
+  Matriz_Normal_Tumor[,-c(1:3)]
+Matriz_Normal_Tumor <- 
+  Matriz_Normal_Tumor[,-c(2:4)]
+```
+
+Se filtra el dataset verificando cuales de los genes (variables predictoras) estan activas por cada una de las muestras, para determinar el umbral que define si la muestra esta activa, se hallo el valor maximo en el dataset, resultando un valor de 7032374, sobre este valor se definio como umbral el 0.02% del valor maximo, para concluir en dicho porcentaje, se tomo como base que al realizar el primer filtro, debian quedar entre 7.000 y 14.000 genes, se realiza con el codigo:
+
+```{r eval=FALSE}
+Valor_Maximo <- max(Matriz_Normal_Tumor[,2:23688], na.rm=FALSE)*0.0002
+```
+
+Binarizamos el valor que se expresa en cada Gen por observacion, donde se deja un 0 para aquellos genes que no se encuetren activos (que no superaron el umbral) se deja un 1 para los genes que superan el umbral y que se encuentran activos. 
+
+Eliminamos los genes que no se encuentren expresados en almenos el 20% de las observaciones, resultando 9122 genes que se encuentran expresados en almenos el 20% de las muestras
+
+En la matriz PPI, clasificamos los 100 genes que mas se repiten, sumando la cantidad de veces que se repite cada Gen tanto en la columna `Input-node Gene Symbol`como en la columna `Output-node Gene Symbol`, se clasifican de manera descendente (de mayor a menor) y se toma el top 100 de muestras, esto se realiza con el codigo, estos genes seran los predictores de los modelos a implementar:
+
+```{r eval=FALSE}
+Agrupacion <- PPI %>% group_by(`Input-node Gene Symbol`) %>%
+  summarise(NN = n()) %>%
+  rename(`Gen`=`Input-node Gene Symbol`)
+
+Agrupacion2 <- PPI %>% group_by(`Output-node Gene Symbol`) %>%
+  summarise(NN = n()) %>%
+  rename(`Gen`=`Output-node Gene Symbol`)
+
+tabla_combinada <- bind_rows(Agrupacion, Agrupacion2) %>%
+  group_by(`Gen`) %>%
+  summarise(NN = sum(NN)) %>%
+  arrange(desc(NN)) %>%
+  top_n(101, NN)
+```
+
+Posteriormente eliminamos de la Matriz que incluye pacientes con tumor y sin tumor, aquellos genes que no se encuentran incluidos en el top 100 de genes de la Matriz PPI, resultando la `Matriz_final` con la que implementaremos nuestros modelos
+
+
+
+## 4. Resultados y discusión
+
+Modelo k-NN
+
+Se observa que el modelo KNN presenta mayor rendimiento al implementar la normalización de mínimos y máximos (Fig. 1) que al implementar la estandarización z score .
+
+
+```{r, message=FALSE, include=FALSE, warning=FALSE}
+MatrizFinal_df <- Matriz_Final
+MatrizFinal_df$sample_type <- as.factor(MatrizFinal_df$sample_type)
+
+set.seed(1)
+sample.index <- sample(1:nrow(MatrizFinal_df)
+                       ,nrow(MatrizFinal_df)*0.7
+                       ,replace = F)
+
+predictor <- colnames(MatrizFinal_df)[-1]
+
+train.data <- MatrizFinal_df[sample.index,c(predictor,"sample_type"),drop=F]
+test.data <- MatrizFinal_df[-sample.index,c(predictor,"sample_type"),drop=F]
+
+ctrl <- trainControl(method="cv", p = 0.7)
+knnTrain <- train( sample_type ~ .
+                   , data = train.data
+                   , method = "knn", trControl = ctrl
+                   , preProcess = c("range") #c("center", "scale")
+                   , tuneLength = 25)
+
+knnTrain
+plot(knnTrain)
+
+knnPredict <- predict(knnTrain, newdata = test.data)
+knnPredict
+```
+
+
+```{r, message=FALSE}
+confusionMatrix(knnPredict, test.data$sample_type)
+```
+
+De acuerdo a la Fig. 1 se observa que el modelo se entrenó con 853 muestras, contaba con 101 variables predictoras y la variable clase presentó 2 niveles: “Primary Tumor” y “ Solid Tissue Normal”. El modelo presentó una precisión del 97% y su valor kappa fue de 0.84, este modelo detecta de mejor manera los verdaderos positivos teniendo en cuenta que su sensibilidad es del 99%.
+Se predijo que 334 casos tendrían un gen activo para un tumor primario, el cual se tiene activo y predijo que 3 tendrían un tumor primario pero no lo tenía. Por otro lado, predijo que 5 casos no tendrían el gen activo (no tendrían tumor) pero si tienen un tumor primario y 24 casos no tendrían tumor y efectivamente no lo tienen.
+
+Modelo Regresión Lineal
+
+Para el modelo se utilizan los mismos datos del modelo anterior, solamente se genera el cambio de los valores de los coeficientes a numéricos. En la primera etapa se obtienen los coeficientes de regresión y la predicción de cada uno de los genes.
+
+Dada la significancia estadística, se realiza nuevamente el modelo con los genes más representativos, menores a 0.01, los cuales, EP300, AR, ESR1, RB1, CSNK2A1, MAPK1, HDAC1, PRKCA, EGFR, SMAD1, MAPK3, CSNK2B, YWHAB, TBP, RELA, SMAD9, PTK2 , JAK2, MYC,HCK, VCL, SKIL, SRF, APP, PDPK1. Donde finalmente se describen 58% de los datos de la data , en la que se pueden explicar con el modelo y se obtiene un error de predicción promedio mínimo de y -0.84658  máximo de 0.75576, lo que indica que se subestima un 0.755 ya que es un valor positivo.
+
+```{r, message=FALSE, include=FALSE, warning=FALSE}
+ins_model_1 <- lm(as.numeric(sample_type) ~ ., data = train.data)
+ins_model_1
+
+predict(ins_model_1, newdata = test.data)
+summary(ins_model_1)
+
+excl_v <- c("TP53", "CREBBP", "YWHAG", "SMAD3", "GRB2", "SRC", "SMAD2", "CDKN1A",
+            "FYN", "TK1", "SMAD4", "JUN", "CCDC85B", "MAPK6", "GSK3B","PIK3R1",
+            "SHC1", "TRAF2", "YWHAZ", "CASP3", "UBE2I", "SP1", "VIM", "ATXN1",
+            "SMN1", "UBQLN4", "PRKACA", "TGFBR1", "CALM1", "SETDB1", "BRCA1",
+            "CTNNB1", "LCK", "RXRA", "EEF1A1", "AKT1", "STAT3", "PTPN11", "NCOA1",
+            "PLCG1", "ACTB", "MDFI",  "EWSR1", "RAC1", "NFKB1", "NR3C1", "UNC119",
+            "ABL1", "DLG4", "ATN1","NCOR2", "CDK2", "CHD3", "PRKCD", "MAPK14", "TLE1",
+            "XRCC6", "CBL", "INSR", "PTN", "ZBTB16", "KAT5", "CAV1", "RAF1", "STAT1",
+            "COPS6", "KAT2B", "PTPN6", "MAPK8", "PXN", "ACTA1", "NCOR1", "PIN1", "TRAF6",
+            "ANXA7", "LYN"
+)
+
+train.data_Rl <- train.data[, !(names(train.data) %in% excl_v)]
+test.data_Rl <- test.data[, !(names(test.data) %in% excl_v)]
+
+model_excl_Rl <- lm(as.numeric(sample_type) ~ ., data = train.data_Rl)
+
+
+
+{r, message=FALSE}
+ins_model_1
+summary(ins_model_1)
+summary(model_excl_Rl)
+
+
+Modelo Regresión Logística
+
+{r, message=FALSE, include=FALSE, warning=FALSE}
+MF_df <- Matriz_Final
+MF_df$sample_type <- MF_df$sample_type=="Primary Tumor"
+MF_df$sample_type <- 1*MF_df$sample_type
+MF_df$sample_type <- as.factor(MF_df$sample_type)
+
+sample.index2 <- sample(1:nrow(MF_df)
+                        ,nrow(MF_df)*0.7
+                        ,replace = F)
+
+predictor2 <- colnames(MF_df)[-1]
+
+train.data2 <- MF_df[sample.index2,c(predictor2,"sample_type"),drop=F]
+test.data2 <- MF_df[-sample.index2,c(predictor2,"sample_type"),drop=F]
+
+LogisticTrain <- glm(formula = sample_type ~ .
+                     ,data = train.data2
+                     ,family = "binomial")
+LogisticTrain
+
+Lpredict <- predict(LogisticTrain, newdata = test.data2
+                    , type = "response")
+
+predicted_classes <- ifelse(Lpredict > 0.5, 1, 0)
+predicted_classes <- factor(predicted_classes, levels = levels(test.data2$sample_type))
+
+confusion_matrix <- confusionMatrix(data = predicted_classes, reference = test.data2$sample_type)
+```
+
+
+```{r, message=FALSE}
+Lpredict
+print(confusion_matrix)
+```
+
+El algoritmo en su predicción calculó la probabilidad entre 0 y 1, donde 1 hace referencia a que el gen está activo y 0 el gen no está activo, de acuerdo a la figura anterior, las muestras  2    3    4    5    8   11   13   17   18   22   23   25   26   40   51   52   54   55   56   60   61   63   64 tienen el gen activo mientras que la muestra 66 tiene el gen no activo.
+
+Arbol de decisión
+
+```{r}
+head (Matriz_Final)
+
+Matriz_Final[, "sample_type"] <- as.factor(Matriz_Final[, "sample_type"])
+
+modelo_arbol <- rpart(sample_type ~ ., data = Matriz_Final, na.action = na.omit)
+
+plot(modelo_arbol, uniform=T, margin=0.1)
+text(modelo_arbol, use.n=T, all=T, cex=0.8)
+
+rpart.plot::rpart.plot(modelo_arbol, tweak=1.5)
+
+
+modelo_arbol$cptable
+
+Etiquetas_Modelo_Arbol <- predict(modelo_arbol, Matriz_Final[,-1], type="class")
+confusionMatrix(Etiquetas_Modelo_Arbol, Matriz_Final[,1])
+```
+
+
+##5. Conclusión
+
+Se puede concluir que ambos tipos de modelos tienen sus ventajas y desventajas, los modelos de clasificación son buenos para problemas en los que se necesita predecir una categoría, y los modelos de regresión son buenos para problemas en los que se necesita predecir un valor continuo.
+
+En este caso, el objetivo era predecir si un paciente tiene cáncer o no. Por lo tanto, cualquier modelo de clasificación es un buen candidato para dar una solución. Sin embargo, un modelo de regresión se puede contemplar, de este modo, utilizar un modelo de regresión logística puede predecir la probabilidad de que un paciente tenga o no cáncer.
+
+
+##6. Referencias
+
+IBM.(s/f) ¿Qué es el aprendizaje supervisado?. Ibm.com. Recuperado el 22 de noviembre de 2023, de https://www.ibm.com/mx-es/topics/supervised-learning
+
+Villalba (), F. (s/f). Aprendizaje supervisado en R. Github.io. Recuperado el 22 de noviembre de 2023, de https://fervilber.github.io/Aprendizaje-supervisado-en-R/
+
+Capítulo 10 Aprendizaje Supervisado. (2020, junio 26). Bookdown.org. https://bookdown.org/dparedesi/data-science-con-r/aprendizaje-supervisado.html
+
+Train and Test datasets in Machine Learning. (s/f). Www.javatpoint.com. Recuperado el 22 de noviembre de 2023, de https://www.javatpoint.com/train-and-test-datasets-in-machine-learning
+
+IT Solutions de BETWEEN. (2020). ¿Qué es el overfitting en machine learning? Between.tech. Recuperado el 22 de noviembre de 2023, de https://impulsate.between.tech/overfitting-machine-learning
+
+Cross-Validation : definición e importancia en Machine Learning. (2022, mayo 13). Formation Data Science | Datascientest.com. https://datascientest.com/es/cross-validation-definicion-e-importancia
+
+Amazon Web Service. (s. f.). ¿Qué es la ciencia de datos? - Explicación de la ciencia de datos - AWS. Amazon Web Services, Inc. https://aws.amazon.com/es/what-is/data-science/
+
+De Ceupe, B. (2022, 28 marzo). Ceupe. Ceupe.
+https://www.ceupe.com/blog/aprendizaje-supervisado.html
+
+Importancia del Data Science - Máster en Data Science. (2018, 17 junio). Universidad de Alcalá. 
+https://www.master-data-scientist.com/importancia-data-science/
+
+¿Qué es el aprendizaje supervisado? | IBM. (s. f.). https://www.ibm.com/mx-es/topics/supervised-learning
+
+Universidad Veracruzana. (s. f.). Conocimientos generales: ¿Sabes cuántos datos se generan en un minuto? – Seguridad de la información. https://www.uv.mx/infosegura/general/conocimientos_datos/
