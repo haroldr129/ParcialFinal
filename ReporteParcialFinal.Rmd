@@ -329,9 +329,6 @@ Matriz_Final[, "sample_type"] <- as.factor(Matriz_Final[, "sample_type"])
 
 modelo_arbol <- rpart(sample_type ~ ., data = Matriz_Final, na.action = na.omit)
 
-plot(modelo_arbol, uniform=T, margin=0.1)
-text(modelo_arbol, use.n=T, all=T, cex=0.8)
-
 rpart.plot::rpart.plot(modelo_arbol, tweak=1.5)
 
 
