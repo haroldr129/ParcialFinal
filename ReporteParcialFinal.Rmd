@@ -271,18 +271,19 @@ train.data_Rl <- train.data[, !(names(train.data) %in% excl_v)]
 test.data_Rl <- test.data[, !(names(test.data) %in% excl_v)]
 
 model_excl_Rl <- lm(as.numeric(sample_type) ~ ., data = train.data_Rl)
+```
 
 
-
-{r, message=FALSE}
+```{r, message=FALSE}
 ins_model_1
 summary(ins_model_1)
 summary(model_excl_Rl)
-
+```
 
 Modelo Regresión Logística
 
-{r, message=FALSE, include=FALSE, warning=FALSE}
+
+```{r, message=FALSE, include=FALSE, warning=FALSE}
 MF_df <- Matriz_Final
 MF_df$sample_type <- MF_df$sample_type=="Primary Tumor"
 MF_df$sample_type <- 1*MF_df$sample_type
